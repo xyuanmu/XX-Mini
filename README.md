@@ -8,7 +8,8 @@
 
 ## 版本下载
 * Windows: https://github.com/xyuanmu/XX-Mini/releases/download/1.1/XX-Mini_win_v1.1.zip
-* Linux: https://github.com/xyuanmu/XX-Mini/releases/download/1.1/XX-Mini_linux_v1.1.zip
+
+* Linux/MacOSX: https://github.com/xyuanmu/XX-Mini/releases/download/1.1/XX-Mini_linux_v1.1.zip
 
 ## 使用说明
 ### Windows：
@@ -18,8 +19,8 @@
 * 双击 addto-startup.js 脚本可以添加开机启动项
 
 ### Linux：
-* 下载 Linux 版本解压后，打开终端，定位到 XX-Mini 目录，输入 `python proxy.py` 等待一段时间扫描IP
-* 之后设置浏览器代理为：127.0.0.1，端口：8087，支持pac自动代理的设置为 `http://127.0.0.1:8086/proxy.pac`
+* 下载 Linux/MacOSX 版本解压后，打开终端，CD到 XX-Mini 目录，输入 `python proxy.py` 运行， Linux还可直接点击 `goagent-gtk.py` 启动，显示托盘
+* 之后设置浏览器代理为：127.0.0.1，端口：8087，支持pac自动代理的设置为 `http://127.0.0.1:8086/proxy.pac`，或者选择浏览器插件调用
 * 接下来即可使用浏览器翻墙，但公共appid不允许观看视频和下载
 * 在 XX-Mini 目录，输入 `python addto-startup.py` 可以添加系统启动项
 
