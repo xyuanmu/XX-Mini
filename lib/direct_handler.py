@@ -16,7 +16,7 @@ from config import config
 from xlog import getLogger
 xlog = getLogger("gae_proxy")
 
-google_server_types = ["ClientMapServer"]
+google_server_types = ["ClientMapServer", "HTTP server (unknown)"]
 
 
 def send_header(wfile, keyword, value):
