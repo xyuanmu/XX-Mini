@@ -4,11 +4,11 @@ import re
 import socket
 import ssl
 import httplib
-import gae_handler
 
 import OpenSSL
 NetWorkIOError = (socket.error, ssl.SSLError, OpenSSL.SSL.Error, OSError)
 
+from gae_handler import return_fail_message
 from connect_manager import https_manager
 from google_ip import google_ip
 from config import config
@@ -83,7 +83,7 @@ def handler(method, host, url, headers, body, wfile):
     response = None
     while True:
         if time.time() - time_request > 30:
-            return gae_handler.return_fail_message(wfile)
+            return return_fail_message(wfile)
 
         try:
             response = fetch(method, host, url, headers, body)
@@ -92,13 +92,9 @@ def handler(method, host, url, headers, body, wfile):
                     server_type = response.getheader('Server', "")
 
                     if "G" not in server_type and "g" not in server_type and server_type not in google_server_types:
-                        try:
-                            path = "https://" + host + url
-                            gae_handler.handler(method, path, headers, body, wfile)
-                        except:
-                            xlog.warn("IP:%s host:%s not support GAE, server type:%s status:%d", response.ssl_sock.ip, host, server_type, response.status)
-                            google_ip.report_connect_fail(response.ssl_sock.ip)
-                            response.close()
+                        xlog.warn("IP:%s host:%s not support GAE, server type:%s status:%d", response.ssl_sock.ip, host, server_type, response.status)
+                        google_ip.report_connect_fail(response.ssl_sock.ip)
+                        response.close()
                         continue
                 break
         except OpenSSL.SSL.SysCallError as e:
