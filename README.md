@@ -10,7 +10,7 @@
 
 ## 使用说明
 ### Windows：
-* 下载 Windows 版本解压后，双击运行 goagent.exe 等待一段时间扫描IP（半小时左右）
+* 下载 Windows 版本解压后，第一次以管理员身份运行 goagent.exe 等待一段时间扫描IP（半小时左右）
 * 当有足够IP的时候右键点击系统托盘 goagent 图标 - 设置 IE 代理，选择 `http://127.0.0.1:8086/proxy.pac`
 * 接下来即可使用IE进行翻墙，但公共appid不允许观看视频和下载
 * 双击 addto-startup.js 脚本可以添加开机启动项
