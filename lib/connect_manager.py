@@ -5,7 +5,6 @@ import socket
 import struct
 import threading
 import operator
-import httplib
 import socks
 
 from xlog import getLogger
@@ -74,10 +73,10 @@ class Connect_pool():
         self.not_empty.acquire()
         try:
             if not block:
-                if not self.qsize(only_h1=only_h1):
+                if self.qsize(only_h1=only_h1) == 0:
                     return None
             elif timeout is None:
-                while not self.qsize(only_h1=only_h1):
+                while self.qsize(only_h1=only_h1) == 0:
                     self.not_empty.wait()
             elif timeout < 0:
                 raise ValueError("'timeout' must be a positive number")
@@ -520,13 +519,15 @@ class Https_connection_manager(object):
         if ssl_sock:
             return ssl_sock
         else:
-            ret = self.new_conn_pool.get(True, self.max_timeout, only_h1=only_h1)
+            start_time = time.time()
+            ret = self.new_conn_pool.get(True, 1, only_h1=only_h1)
             if ret:
                 handshake_time, ssl_sock = ret
                 return ssl_sock
             else:
-                xlog.debug("create ssl timeout fail.")
-                return None
+                if time.time() - start_time > self.max_timeout:
+                    xlog.debug("create ssl timeout fail.")
+                    return None
 
     def get_new_ssl(self, only_h1=True):
         self.create_more_connection()

@@ -37,8 +37,11 @@ class HTTP_client():
 
         self.sock_pool = Queue.Queue()
 
-    def create_sock(self):
-        sock = socket.socket(socket.AF_INET)
+    def create_sock(self, host):
+        if ":" in self.address[0]:
+            sock = socket.socket(socket.AF_INET6)
+        else:
+            sock = socket.socket(socket.AF_INET)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
         sock.settimeout(5)
         try:
@@ -59,7 +62,7 @@ class HTTP_client():
 
         return sock
 
-    def get_conn(self):
+    def get_conn(self, host):
         try:
             conn = self.sock_pool.get_nowait()
             if self.conn_life and time.time() - conn.create_time > self.conn_life:
@@ -68,7 +71,7 @@ class HTTP_client():
                 raise
             return conn
         except:
-            sock = self.create_sock()
+            sock = self.create_sock(host)
             if not sock:
                 return None
 
@@ -110,7 +113,7 @@ class HTTP_client():
                     except Exception as e:
                         xlog.warn("Transfer-Encoding e:%r ", e)
                         return "", False, response
-
+                    
 
                     if not data:
                         break
@@ -164,7 +167,7 @@ class HTTP_client():
         #print("request:%s" % request_data)
         #print("payload:%s" % payload)
 
-        conn = self.get_conn()
+        conn = self.get_conn(host)
         if not conn:
             logging.warn("get sock fail")
             return
@@ -173,7 +176,7 @@ class HTTP_client():
             payload = request_data.encode() + payload
         else:
             conn.sock.send(request_data.encode())
-
+            
         payload_len = len(payload)
         start = 0
         while start < payload_len:

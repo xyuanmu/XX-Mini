@@ -95,6 +95,9 @@ user =
 passwd =
 
 [google_ip]
+;ip_pool 使用检测过的IP池来扫描，但IP池体积太大未放入Mini，需要开启的可以下载 ip_checked.txt 放到Mini根目录并删掉 ip_pool 前面的减号
+;ip_checked.txt 链接: https://github.com/XX-net/XX-Net/raw/master/code/default/gae_proxy/local/ip_checked.txt
+ip_source = -ip_pool
 ;开启 IPv6 选项，1开启，0关闭，慎重！
 use_ipv6 = 0
 ;自动调整扫描线程数

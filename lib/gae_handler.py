@@ -69,7 +69,7 @@ def spawn_later(seconds, target, *args, **kwargs):
         __import__('time').sleep(seconds)
         try:
             result = target(*args, **kwargs)
-        except:
+        except BaseException:
             result = None
         return result
     return __import__('thread').start_new_thread(wrap, args, kwargs)
@@ -127,12 +127,12 @@ def return_fail_message(wfile):
     return
 
 
-def request_gae_server(headers, body):
+def request_gae_server(headers, body, url):
     # process on http protocol
     # process status code return by http server
     # raise error, let up layer retry.
 
-    response = http_dispatch.request(headers, body)
+    response = http_dispatch.request(headers, body, url)
     if not response:
         raise GAE_Exception(600, "fetch gae fail")
 
@@ -199,8 +199,6 @@ def pack_request(method, url, headers, body):
     if config.GAE_PASSWORD:
         kwargs['password'] = config.GAE_PASSWORD
 
-    #kwargs['options'] =
-    #kwargs['validate'] =
     kwargs['maxsize'] = config.AUTORANGE_MAXSIZE
     kwargs['timeout'] = '19'
 
@@ -210,10 +208,10 @@ def pack_request(method, url, headers, body):
     #    xlog.debug("Send %s: %s", k, v)
     payload += ''.join('X-URLFETCH-%s: %s\r\n' % (k, v) for k, v in kwargs.items() if v)
 
-    request_headers = {}
     payload = deflate(payload)
 
     body = '%s%s%s' % (struct.pack('!h', len(payload)), payload, body)
+    request_headers = {}
     request_headers['Content-Length'] = str(len(body))
 
     return request_headers, body
@@ -264,7 +262,7 @@ def request_gae_proxy(method, url, headers, body):
             raise GAE_Exception(600, b"".join(error_msg))
 
         try:
-            response = request_gae_server(request_headers, request_body)
+            response = request_gae_server(request_headers, request_body, url)
 
             check_local_network.report_network_ok()
 
@@ -289,7 +287,7 @@ def request_gae_proxy(method, url, headers, body):
             error_msg.append(err_msg)
             xlog.warn("gae_exception:%r %s", e, url)
         except Exception as e:
-            err_msg = 'gae_handler.handler %r %s , retry...' % ( e, url)
+            err_msg = 'gae_handler.handler %r %s , retry...' % (e, url)
             error_msg.append(err_msg)
             xlog.exception('gae_handler.handler %r %s , retry...', e, url)
 
@@ -347,7 +345,7 @@ def handler(method, url, headers, body, wfile):
         response = request_gae_proxy(method, url, headers, body)
     except GAE_Exception as e:
         xlog.warn("GAE %s %s request fail:%r", method, url, e)
-        send_response(wfile, e.type, body=e.message)
+        send_response(wfile, e.error_code, body=e.message)
         return return_fail_message(wfile)
 
     if response.app_msg:

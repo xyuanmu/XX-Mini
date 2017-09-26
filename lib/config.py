@@ -9,6 +9,7 @@ xlog = getLogger("gae_proxy")
 
 from OpenSSL import version as openssl_version
 
+__mini_version__ = '1.3.2'
 file_path = os.path.dirname(os.path.abspath(__file__))
 current_path = os.path.abspath(os.path.join(file_path, os.pardir))
 
@@ -104,9 +105,8 @@ class Config(object):
 
         self.https_max_connect_thread = config.CONFIG.getint("connect_manager", "https_max_connect_thread")
         self.connect_interval = config.CONFIG.getint("connect_manager", "connect_interval")
-        self.max_worker_num = config.CONFIG.getint("connect_manager", "max_worker_num")
 
-        self.version = config.CONFIG.get("system", "version")
+        self.version = __mini_version__
         self.log_file = config.CONFIG.getint("system", "log_file")
         self.log_scan = config.CONFIG.getint("system", "log_scan") if config.CONFIG.has_option("system", "log_scan") else False
 
