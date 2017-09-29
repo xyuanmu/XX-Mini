@@ -1,3 +1,22 @@
+# -*- coding: utf-8 -*-
+"""
+port from hyper/http20/stream for async
+remove push support
+increase init window size to improve performance
+~~~~~~~~~~~~~~~~~~~
+
+Objects that make up the stream-level abstraction of hyper's HTTP/2 support.
+
+
+Conceptually, a single HTTP/2 connection is made up of many streams: each
+stream is an independent, bi-directional sequence of HTTP headers and data.
+Each stream is identified by a monotonically increasing integer, assigned to
+the stream by the endpoint that initiated the stream.
+"""
+
+
+
+
 from hyper.common.headers import HTTPHeaderMap
 from hyper.packages.hyperframe.frame import (
     FRAME_MAX_LEN, FRAMES, HeadersFrame, DataFrame, PushPromiseFrame,
@@ -219,8 +238,12 @@ class Stream(object):
                 w.window_increment = increment
                 self._send_cb(w)
         elif frame.type == RstStreamFrame.type:
-            xlog.warn("%s Stream %d forcefully closed.", self.ip, self.stream_id)
-            self.close("RESET")
+            # Rest Frame send from server is not define in RFC
+            # but GAE server will not work on this connection anymore
+            inactive_time = time.time() - self.connection.last_active_time
+            xlog.debug("%s Stream %d Rest by server, inactive:%d. error code:%d",
+                       self.ip, self.stream_id, inactive_time, frame.error_code)
+            self.connection.close("RESET")
         elif frame.type in FRAMES:
             # This frame isn't valid at this point.
             #raise ValueError("Unexpected frame %s." % frame)
@@ -241,16 +264,16 @@ class Stream(object):
             self.response_header_datas = None
 
             self.task.content_length = int(self.response_headers["Content-Length"][0])
-            time_now = self.task.set_state("h2_get_head")
-            self.get_head_time = time_now
+            self.task.set_state("h2_get_head")
+            self.get_head_time = time.time()
             self.send_response()
 
         if 'END_STREAM' in frame.flags:
             #xlog.debug("%s Closing remote side of stream:%d", self.ip, self.stream_id)
             time_now = time.time()
-            time_cose = time_now - self.get_head_time
-            if time_cose:
-                speed = self.task.content_length / time_cose
+            time_cost = time_now - self.get_head_time
+            if time_cost > 0:
+                speed = self.task.content_length / time_cost
                 self.task.set_state("h2_finish[SP:%d]" % speed)
                 self.connection.report_speed(speed, self.task.content_length)
 
@@ -259,6 +282,12 @@ class Stream(object):
             self.close("end stream")
 
     def send_response(self):
+        if self.task.responsed:
+            xlog.error("http2_stream send_response but responsed.%s", self.task.url)
+            self.close("h2 stream send_response but sended.")
+            return
+
+        self.task.responsed = True
         status = int(self.response_headers[b':status'][0])
         strip_headers(self.response_headers)
         response = BaseResponse(status=status, headers=self.response_headers)
@@ -268,10 +297,13 @@ class Stream(object):
         self.task.queue.put(response)
 
     def close(self, reason=""):
-        self.task.put_data("")
-        # empty block means fail or closed.
-
         self._close_cb(self.stream_id, reason)
+
+        if not self.task.responsed:
+            self.connection.retry_task_cb(self.task)
+        else:
+            self.task.put_data("")
+            # empty block means fail or closed.
 
     def _handle_header_block(self, headers):
         """
