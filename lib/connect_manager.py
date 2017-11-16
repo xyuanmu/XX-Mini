@@ -1,48 +1,15 @@
-import os
-import binascii
 import time
-import socket
-import struct
 import threading
 import operator
-import socks
+
 
 from xlog import getLogger
 xlog = getLogger("gae_proxy")
 
-file_path = os.path.dirname(os.path.abspath(__file__))
-current_path = os.path.abspath(os.path.join(file_path, os.pardir))
-
-import OpenSSL
-SSLError = OpenSSL.SSL.WantReadError
-
 from config import config
-
-
-def load_proxy_config():
-    if config.PROXY_ENABLE:
-        if config.PROXY_TYPE == "HTTP":
-            proxy_type = socks.HTTP
-        elif config.PROXY_TYPE == "SOCKS4":
-            proxy_type = socks.SOCKS4
-        elif config.PROXY_TYPE == "SOCKS5":
-            proxy_type = socks.SOCKS5
-        else:
-            xlog.error("proxy type %s unknown, disable proxy", config.PROXY_TYPE)
-            config.PROXY_ENABLE = 0
-            return
-
-        socks.set_default_proxy(proxy_type, config.PROXY_HOST, config.PROXY_PORT, config.PROXY_USER, config.PROXY_PASSWD)
-load_proxy_config()
-
-
 from google_ip import google_ip
-from openssl_wrap import SSLConnection
-
-NetWorkIOError = (socket.error, SSLError, OpenSSL.SSL.Error, OSError)
-
-g_cacertfile = os.path.join(current_path, "cacert.pem")
 import connect_control
+import check_ip
 
 
 class Connect_pool():
@@ -142,7 +109,7 @@ class Connect_pool():
         try:
             pool = tuple(self.pool)
             for sock in pool:
-                inactive_time = time.time() -sock.last_use_time
+                inactive_time = time.time() - sock.last_use_time
                 # xlog.debug("inactive_time:%d", inactive_time * 1000)
                 if inactive_time >= maxtime:
                     return_list.append(sock)
@@ -175,7 +142,7 @@ class Connect_pool():
             i = 0
             for item in pool:
                 sock,t = item
-                out_str += "%d \t %s handshake:%d not_active_time:%d h2:%d\r\n" % (i, sock.ip, t, time.time() -sock.last_use_time, sock.h2)
+                out_str += "%d \t %s handshake:%d not_active_time:%d h2:%d\r\n" % (i, sock.ip, t, time.time() - sock.last_use_time, sock.h2)
                 i += 1
         finally:
             self.pool_lock.release()
@@ -187,21 +154,7 @@ class Https_connection_manager(object):
     thread_num_lock = threading.Lock()
 
     def __init__(self):
-        # http://docs.python.org/dev/library/ssl.html
-        # http://blog.ivanristic.com/2009/07/examples-of-the-information-collected-from-ssl-handshakes.html
-        # http://src.chromium.org/svn/trunk/src/net/third_party/nss/ssl/sslenum.c
-        # openssl s_server -accept 443 -key CA.crt -cert CA.crt
-
-        # ref: http://vincent.bernat.im/en/blog/2011-ssl-session-reuse-rfc5077.html
-        self.openssl_context = SSLConnection.context_builder(ca_certs=g_cacertfile)
-        try:
-            self.openssl_context.set_session_id(binascii.b2a_hex(os.urandom(10)))
-        except:
-            pass
-
-        if hasattr(OpenSSL.SSL, 'SESS_CACHE_BOTH'):
-            self.openssl_context.set_session_cache_mode(OpenSSL.SSL.SESS_CACHE_BOTH)
-
+        self.class_name = "Https_connection_manager"
         self.timeout = 4
         self.max_timeout = 60
         self.thread_num = 0
@@ -231,6 +184,7 @@ class Https_connection_manager(object):
         self.connection_pool_max_num = config.CONFIG.getint("connect_manager", "https_connection_pool_max")
         self.connection_pool_min_num = config.CONFIG.getint("connect_manager", "https_connection_pool_min")
         self.keep_alive = config.CONFIG.getint("connect_manager", "https_keep_alive")
+        self.keep_active_timeout = config.CONFIG.getint("connect_manager", "keep_active_timeout")
         self.https_new_connect_num = config.CONFIG.getint("connect_manager", "https_new_connect_num")
 
         self.new_conn_pool = Connect_pool()
@@ -306,9 +260,9 @@ class Https_connection_manager(object):
     def connect_process(self):
         try:
             ip_str = google_ip.get_gws_ip()
-            if not ip_str or ip_str == 404:
+            if not ip_str:
                 time.sleep(60)
-                # xlog.warning("no enough ip")
+                xlog.warning("no enough ip")
                 return
 
             #xlog.debug("create ssl conn %s", ip_str)
@@ -353,13 +307,11 @@ class Https_connection_manager(object):
                     break
 
                 ip_str = google_ip.get_gws_ip()
-                if not ip_str or ip_str == 404:
-                    if ip_str != 404:
-                        xlog.warning("no enough ip")
+                if not ip_str:
+                    xlog.warning("no enough ip")
                     time.sleep(60)
                     break
 
-                #xlog.debug("create ssl conn %s", ip_str)
                 ssl_sock = self._create_ssl_connection( (ip_str, 443) )
                 if not ssl_sock:
                     continue
@@ -387,85 +339,25 @@ class Https_connection_manager(object):
         ssl_sock = None
         ip = ip_port[0]
 
-        connect_time = 0
-        handshake_time = 0
-        time_begin = time.time()
         try:
-            if config.PROXY_ENABLE:
-                sock = socks.socksocket(socket.AF_INET if ':' not in ip else socket.AF_INET6)
-            else:
-                sock = socket.socket(socket.AF_INET if ':' not in ip else socket.AF_INET6)
-            # set reuseaddr option to avoid 10048 socket error
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # set struct linger{l_onoff=1,l_linger=0} to avoid 10048 socket error
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-            # resize socket recv buffer 8K->32K to improve browser releated application performance
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64*1024)
-            # disable negal algorithm to send http request quickly.
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
-            # set a short timeout to trigger timeout retry more quickly.
+            ssl_sock = check_ip.connect_ssl(ip, port=443, timeout=self.timeout, check_cert=True,
+                                            close_cb=google_ip.ssl_closed)
 
-            sock.settimeout(self.timeout)
-
-            ssl_sock = SSLConnection(self.openssl_context, sock, ip, google_ip.ssl_closed)
-            ssl_sock.set_connect_state()
-
-            ssl_sock.connect(ip_port)
-            time_connected = time.time()
-            ssl_sock.do_handshake()
-            time_handshaked = time.time()
-
-            def verify_SSL_certificate_issuer(ssl_sock):
-                cert = ssl_sock.get_peer_certificate()
-                if not cert:
-                    #google_ip.report_bad_ip(ssl_sock.ip)
-                    #connect_control.fall_into_honeypot()
-                    raise socket.error(' certficate is none')
-
-                issuer_commonname = next((v for k, v in cert.get_issuer().get_components() if k == 'CN'), '')
-                if not issuer_commonname.startswith('Google'):
-                    google_ip.report_connect_fail(ip, force_remove=True)
-                    raise socket.error(' certficate is issued by %r, not Google' % ( issuer_commonname))
-
-            verify_SSL_certificate_issuer(ssl_sock)
-
-            handshake_time = int((time_handshaked - time_connected) * 1000)
-
-            try:
-                h2 = ssl_sock.get_alpn_proto_negotiated()
-                if h2 == "h2":
-                    ssl_sock.h2 = True
-                    # xlog.debug("ip:%s http/2", ip)
-                else:
-                    ssl_sock.h2 = False
-
-                #xlog.deubg("alpn h2:%s", h2)
-            except:
-                if hasattr(ssl_sock._connection, "protos") and ssl_sock._connection.protos == "h2":
-                    ssl_sock.h2 = True
-                    # xlog.debug("ip:%s http/2", ip)
-                else:
-                    ssl_sock.h2 = False
-                    # xlog.debug("ip:%s http/1.1", ip)
-
-            google_ip.update_ip(ip, handshake_time)
-            xlog.debug("create_ssl update ip:%s time:%d h2:%d", ip, handshake_time, ssl_sock.h2)
-            ssl_sock.fd = sock.fileno()
-            ssl_sock.create_time = time_begin
-            ssl_sock.last_use_time = time.time()
-            ssl_sock.received_size = 0
-            ssl_sock.load = 0
-            ssl_sock.handshake_time = handshake_time
-            ssl_sock.host = ''
+            google_ip.update_ip(ip, ssl_sock.handshake_time)
+            xlog.debug("create_ssl update ip:%s time:%d h2:%d", ip, ssl_sock.handshake_time, ssl_sock.h2)
 
             connect_control.report_connect_success()
             return ssl_sock
+        except check_ip.Cert_Exception as e:
+            xlog.debug("connect %s fail:%s ", ip, e)
+            google_ip.report_connect_fail(ip, force_remove=True)
+
+            if ssl_sock:
+                ssl_sock.close()
+            if sock:
+                sock.close()
         except Exception as e:
-            time_cost = time.time() - time_begin
-            if time_cost < self.timeout - 1:
-                xlog.debug("connect %s fail:%s cost:%d h:%d", ip, e, time_cost * 1000, handshake_time)
-            else:
-                xlog.debug("%s fail:%r", ip, e)
+            xlog.debug("connect %s fail:%r", ip, e)
 
             google_ip.report_connect_fail(ip)
             connect_control.report_connect_fail()
@@ -474,7 +366,6 @@ class Https_connection_manager(object):
                 ssl_sock.close()
             if sock:
                 sock.close()
-            return False
 
     def get_ssl_connection(self, host=''):
         ssl_sock = None
@@ -520,14 +411,22 @@ class Https_connection_manager(object):
             return ssl_sock
         else:
             start_time = time.time()
-            ret = self.new_conn_pool.get(True, 1, only_h1=only_h1)
-            if ret:
-                handshake_time, ssl_sock = ret
-                return ssl_sock
-            else:
-                if time.time() - start_time > self.max_timeout:
-                    xlog.debug("create ssl timeout fail.")
-                    return None
+            while True:
+                ret = self.new_conn_pool.get(True, 1, only_h1=only_h1)
+                if ret:
+                    handshake_time, ssl_sock = ret
+                    if time.time() - ssl_sock.last_use_time < self.keep_active_timeout - 1:
+                        # xlog.debug("new_conn_pool.get:%s handshake:%d", ssl_sock.ip, handshake_time)
+                        return ssl_sock
+                    else:
+                        # xlog.debug("new_conn_pool.get:%s handshake:%d timeout.", ssl_sock.ip, handshake_time)
+                        google_ip.report_connect_closed(ssl_sock.ip, "get_timeout")
+                        ssl_sock.close()
+                        continue
+                else:
+                    if time.time() - start_time > self.max_timeout:
+                        xlog.debug("create ssl timeout fail.")
+                        return None
 
     def get_new_ssl(self, only_h1=True):
         self.create_more_connection()
@@ -538,5 +437,6 @@ class Https_connection_manager(object):
         else:
             xlog.debug("get_new_ssl timeout fail.")
             return None
+
 
 https_manager = Https_connection_manager()

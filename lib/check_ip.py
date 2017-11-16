@@ -14,7 +14,10 @@ import check_local_network
 from config import config
 import cert_util
 import openssl_wrap
+import sni_generater
 import hyper
+from xlog import getLogger
+xlog = getLogger("gae_proxy")
 
 file_path = os.path.dirname(os.path.abspath(__file__))
 current_path = os.path.abspath(os.path.join(file_path, os.pardir))
@@ -33,6 +36,20 @@ max_timeout = 5
 default_socket = socket.socket
 
 
+class Cert_Exception(Exception):
+    def __init__(self, message):
+        xlog.debug("Cert_Exception %r", message)
+        self.message = "%s" % (message)
+
+    def __str__(self):
+        # for %s
+        return repr(self.message)
+
+    def __repr__(self):
+        # for %r
+        return repr(self.message)
+
+
 def load_proxy_config():
     global default_socket
     if config.PROXY_ENABLE:
@@ -49,9 +66,17 @@ def load_proxy_config():
         socks.set_default_proxy(proxy_type, config.PROXY_HOST, config.PROXY_PORT, config.PROXY_USER, config.PROXY_PASSWD)
 load_proxy_config()
 
+import threading
+network_fail_lock = threading.Lock()
 
-def connect_ssl(ip, port=443, timeout=5, check_cert=True):
+def connect_ssl(ip, port=443, timeout=5, check_cert=True, close_cb=None):
+    if check_local_network.is_ok(ip):
+        with network_fail_lock:
+           time.sleep(0.1)
+
     ip_port = (ip, port)
+
+    sni = sni_generater.get()
 
     if config.PROXY_ENABLE:
         sock = socks.socksocket(socket.AF_INET if ':' not in ip else socket.AF_INET6)
@@ -65,8 +90,9 @@ def connect_ssl(ip, port=443, timeout=5, check_cert=True):
     sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
     sock.settimeout(timeout)
 
-    ssl_sock = openssl_wrap.SSLConnection(openssl_context, sock, ip)
+    ssl_sock = openssl_wrap.SSLConnection(openssl_context, sock, ip, close_cb)
     ssl_sock.set_connect_state()
+    ssl_sock.set_tlsext_host_name(sni)
 
     time_begin = time.time()
     ssl_sock.connect(ip_port)
@@ -87,9 +113,7 @@ def connect_ssl(ip, port=443, timeout=5, check_cert=True):
     time_handshaked = time.time()
 
     # report network ok
-    check_local_network.network_stat = "OK"
-    check_local_network.last_check_time = time_handshaked
-    check_local_network.continue_fail_count = 0
+    check_local_network.report_ok(ip)
 
     cert = ssl_sock.get_peer_certificate()
     if not cert:
@@ -107,6 +131,14 @@ def connect_ssl(ip, port=443, timeout=5, check_cert=True):
     ssl_sock._sock = sock
     ssl_sock.connct_time = connct_time
     ssl_sock.handshake_time = handshake_time
+
+    ssl_sock.fd = sock.fileno()
+    ssl_sock.create_time = time_begin
+    ssl_sock.last_use_time = time_begin
+    ssl_sock.received_size = 0
+    ssl_sock.load = 0
+    ssl_sock.sni = sni
+    ssl_sock.host = ""
 
     return ssl_sock
 

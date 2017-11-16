@@ -1,3 +1,23 @@
+#!/usr/bin/env python
+# coding:utf-8
+
+
+"""
+This file manage the ssl connection dispatcher
+Include http/1.1 and http/2 workers.
+
+create ssl socket, then run worker on ssl.
+if ssl suppport http/2, run http/2 worker.
+
+provide simple https request block api.
+ caller don't need to known ip/ssl/http2/appid.
+
+performance:
+ get the fastest worker to process the request.
+ sorted by rtt and pipeline task on load.
+"""
+
+
 import os
 import time
 import threading
@@ -14,8 +34,8 @@ import http_common
 from xlog import getLogger
 xlog = getLogger("gae_proxy")
 
-file_path = os.path.dirname(os.path.abspath(__file__))
-current_path = os.path.abspath(os.path.join(file_path, os.pardir))
+
+current_path = os.path.dirname(os.path.abspath(__file__))
 g_cacertfile = os.path.join(current_path, "cacert.pem")
 
 class SimpleCondition(object):
@@ -31,6 +51,7 @@ class SimpleCondition(object):
         self.lock.acquire()
         self.lock.wait()
         self.lock.release()
+
 
 class HttpsDispatcher(object):
     idle_time = 20 * 60
@@ -67,10 +88,10 @@ class HttpsDispatcher(object):
         ssl_sock.host = ssl_sock.appid + ".appspot.com"
 
         if ssl_sock.h2:
-            worker = HTTP2_worker(ssl_sock, self.close_cb, self.retry_task_cb, self._on_worker_idle_cb)
+            worker = HTTP2_worker(ssl_sock, self.close_cb, self.retry_task_cb, self._on_worker_idle_cb, self.log_debug_data)
             self.h2_num += 1
         else:
-            worker = HTTP1_worker(ssl_sock, self.close_cb, self.retry_task_cb, self._on_worker_idle_cb)
+            worker = HTTP1_worker(ssl_sock, self.close_cb, self.retry_task_cb, self._on_worker_idle_cb, self.log_debug_data)
             self.h1_num += 1
 
         self.workers.append(worker)
@@ -79,6 +100,9 @@ class HttpsDispatcher(object):
 
         if check_free_worke:
             self.check_free_worker()
+
+    def log_debug_data(self, rtt, sent, received):
+        pass
 
     def _on_worker_idle_cb(self):
         self.wait_a_worker_cv.notify()
@@ -115,7 +139,7 @@ class HttpsDispatcher(object):
             if idle_num > 5 and acceptable_num > 20:
                 self.triger_create_worker_cv.wait()
 
-    def get_worker(self):
+    def get_worker(self, nowait=False):
         while connect_control.keep_running:
             best_rtt = 9999
             best_worker = None
@@ -130,7 +154,7 @@ class HttpsDispatcher(object):
                     if len(worker.streams) == 0:
                         idle_num += 1
 
-                rtt = worker.get_rtt_rate()
+                rtt = worker.get_score()
 
                 if rtt < best_rtt:
                     best_rtt = rtt
@@ -139,7 +163,7 @@ class HttpsDispatcher(object):
             if idle_num < 5:
                 self.triger_create_worker_cv.notify()
 
-            if best_worker:
+            if best_worker or nowait:
                 return best_worker
 
             self.wait_a_worker_cv.wait()
@@ -160,7 +184,7 @@ class HttpsDispatcher(object):
 
                 idle_num += 1
 
-                rtt = worker.get_rtt_rate()
+                rtt = worker.get_score()
 
                 if rtt > slowest_rtt:
                     slowest_rtt = rtt
@@ -173,21 +197,15 @@ class HttpsDispatcher(object):
                 return
             self.close_cb(slowest_worker)
 
-    def request(self, headers, body, url):
+    def request(self, headers, body, url, timeout):
         # xlog.debug("task start request")
         self.last_request_time = time.time()
         q = Queue.Queue()
-        task = http_common.Task(headers, body, q, url)
-        unique_id = task.unique_id
+        task = http_common.Task(headers, body, q, url, timeout)
         task.set_state("start_request")
         self.request_queue.put(task)
-        self.working_tasks[task.unique_id] = task
         response = q.get(True)
         task.set_state("get_response")
-        try:
-            del self.working_tasks[task.unique_id]
-        except Exception as e:
-            xlog.error("http_dispatcher request unique_id %s, %s not found.", unique_id, task.unique_id)
         return response
 
     def retry_task_cb(self, task):
@@ -269,7 +287,7 @@ class HttpsDispatcher(object):
     def to_string(self):
         worker_rate = {}
         for w in self.workers:
-            worker_rate[w] = w.get_rtt_rate()
+            worker_rate[w] = w.get_score()
 
         w_r = sorted(worker_rate.items(), key=operator.itemgetter(1))
 

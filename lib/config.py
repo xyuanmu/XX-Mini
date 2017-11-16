@@ -9,7 +9,7 @@ xlog = getLogger("gae_proxy")
 
 from OpenSSL import version as openssl_version
 
-__mini_version__ = '1.3.2'
+__mini_version__ = '1.3.3'
 file_path = os.path.dirname(os.path.abspath(__file__))
 current_path = os.path.abspath(os.path.join(file_path, os.pardir))
 
@@ -47,6 +47,7 @@ class Config(object):
         self.PUBLIC_APPIDS = [x.strip() for x in self.CONFIG.get('gae', 'public_appid').split("|")]
         self.GAE_APPIDS = [x.strip() for x in self.CONFIG.get('gae', 'appid').split("|")] if self.CONFIG.get('gae', 'appid') else []
         self.GAE_PASSWORD = self.CONFIG.get('gae', 'password').strip()
+        self.GAE_VALIDATE = self.CONFIG.getint('gae', 'validate')
 
         fwd_endswith = []
         fwd_hosts = []

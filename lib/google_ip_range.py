@@ -15,9 +15,6 @@ xlog = getLogger("gae_proxy")
 file_path = os.path.dirname(os.path.abspath(__file__))
 current_path = os.path.abspath(os.path.join(file_path, os.pardir))
 
-random.seed(time.time()* 1000000)
-
-
 
 class IpPool(object):
     def __init__(self):
@@ -57,12 +54,9 @@ class IpPool(object):
             wfd.write(ip_bin)
             num += 1
 
-
-
         rfd.close()
         wfd.close()
         xlog.info("finished generate binary ip pool file, num:%d", num)
-
 
     def random_get_ip(self):
         while self.bin_fd is None:
@@ -82,10 +76,23 @@ class IpPool(object):
         time.sleep(3)
         raise Exception("get ip fail.")
 
+
 class IpRange(object):
     def __init__(self):
-        self.default_range_file = os.path.join(current_path, "ip_range.txt")
-        self.user_range_file = os.path.join(config.DATA_PATH, "ip_range.txt")
+        if config.USE_IPV6:
+            self.default_range_file = os.path.join(current_path, "ip_range_ipv6.txt")
+            self.user_range_file = os.path.join(config.DATA_PATH, "ip_range_ipv6.txt")
+        else:
+            self.default_range_file = os.path.join(current_path, "ip_range.txt")
+            self.user_range_file = os.path.join(config.DATA_PATH, "ip_range.txt")
+
+        ip_source = config.CONFIG.get("google_ip", "ip_source")
+        if ip_source == "ip_pool" and not config.USE_IPV6:
+            self.ip_pool = IpPool()
+            self.get_ip = self.ip_pool.random_get_ip
+            xlog.info("Use google ip pool.")
+        else:
+            self.load_ip_range()
 
     def load_range_content(self, default=False):
         if not default and os.path.isfile(self.user_range_file):
@@ -103,34 +110,27 @@ class IpRange(object):
         fd.close()
         return content
 
-    def update_range_content(self, content):
-        with open(self.user_range_file, "w") as fd:
-            fd.write(content)
-
-    def remove_user_range(self):
-        try:
-            os.remove(self.user_range_file)
-        except:
-            pass
-
     def load_ip_range(self):
         self.ip_range_map = {}
         self.ip_range_list = []
-        self.ip_range_index = []
         self.candidate_amount_ip = 0
 
         lines = []
         content = self.load_range_content()
         raw_lines = content.splitlines()
         for ip_line in raw_lines:
+            ip_line = ip_line.replace(' ', '')
             if len(ip_line) == 0 or ip_line[0] == '#':
                 continue
-            ip_line = ip_line.replace(' ', '')
             ips = ip_line.split("|")
             for ip in ips:
                 if len(ip) == 0:
                     continue
                 lines.append(ip)
+
+        if config.USE_IPV6:
+            self.ipv6_list = lines
+            return
 
         for line in lines:
             if len(line) == 0 or line[0] == '#':
@@ -149,47 +149,31 @@ class IpRange(object):
 
             self.ip_range_map[self.candidate_amount_ip] = [nbegin, nend]
             self.ip_range_list.append( [nbegin, nend] )
-            self.ip_range_index.append(self.candidate_amount_ip)
             num = nend - nbegin
             self.candidate_amount_ip += num
-            # print ip_utils.ip_num_to_string(nbegin), ip_utils.ip_num_to_string(nend), num
-
-        self.ip_range_index.sort()
-        #print "amount ip num:", self.candidate_amount_ip
-
-    def show_ip_range(self):
-        for id in self.ip_range_map:
-            print "[",id,"]:", self.ip_range_map[id]
-
-    def get_real_random_ip(self):
-        while True:
-            ip_int = random.randint(0, 4294967294)
-            add_last_byte = ip_int % 255
-            if add_last_byte == 0 or add_last_byte == 255:
-                continue
-
-            return ip_int
 
     def get_ip(self):
-        #return self.get_real_random_ip()
-        while True:
-            index = random.randint(0, len(self.ip_range_list) - 1)
-            ip_range = self.ip_range_list[index]
-            #xlog.debug("random.randint %d - %d", ip_range[0], ip_range[1])
-            if ip_range[1] == ip_range[0]:
-                return ip_utils.ip_num_to_string(ip_range[1])
+        if config.USE_IPV6:
+            return random.choice(self.ipv6_list)
+        else:
+            while True:
+                index = random.randint(0, len(self.ip_range_list) - 1)
+                ip_range = self.ip_range_list[index]
+                #xlog.debug("random.randint %d - %d", ip_range[0], ip_range[1])
+                if ip_range[1] == ip_range[0]:
+                    return ip_utils.ip_num_to_string(ip_range[1])
 
-            try:
-                id_2 = random.randint(0, ip_range[1] - ip_range[0])
-            except Exception as e:
-                xlog.exception("random.randint:%r %d - %d, %d", e, ip_range[0], ip_range[1], ip_range[1] - ip_range[0])
-                return
+                try:
+                    id_2 = random.randint(0, ip_range[1] - ip_range[0])
+                except Exception as e:
+                    xlog.exception("random.randint:%r %d - %d, %d", e, ip_range[0], ip_range[1], ip_range[1] - ip_range[0])
+                    return
 
-            ip = ip_range[0] + id_2
-            add_last_byte = ip % 256
-            if add_last_byte == 0 or add_last_byte == 255:
-                continue
+                ip = ip_range[0] + id_2
+                add_last_byte = ip % 256
+                if add_last_byte == 0 or add_last_byte == 255:
+                    continue
 
-            return ip_utils.ip_num_to_string(ip)
+                return ip_utils.ip_num_to_string(ip)
 
 ip_range = IpRange()

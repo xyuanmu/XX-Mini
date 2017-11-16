@@ -1,13 +1,27 @@
 
 __version__ = "1.5.1"
 
+import os, sys
+from base64 import b64encode
 import socket
 import struct
 from errno import EOPNOTSUPP, EINVAL, EAGAIN
 from io import BytesIO, SEEK_CUR
 from collections import Callable
-from ip_utils import check_ip_valid
 import encodings.idna
+
+current_path = os.path.dirname(os.path.abspath(__file__))
+python_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir, 'python27', '1.0'))
+if sys.platform == "win32":
+    win32_lib = os.path.abspath( os.path.join(python_path, 'lib', 'win32'))
+    sys.path.append(win32_lib)
+    import win_inet_pton
+    inet_pton = win_inet_pton.inet_pton
+    inet_ntop = win_inet_pton.inet_ntop
+else:
+    inet_pton = socket.inet_pton
+    inet_ntop = socket.inet_ntop
+
 
 PROXY_TYPE_SOCKS4 = SOCKS4 = 1
 PROXY_TYPE_SOCKS5 = SOCKS5 = 2
@@ -16,6 +30,7 @@ PROXY_TYPE_HTTP = HTTP = 3
 PRINTABLE_PROXY_TYPES = {SOCKS4: "SOCKS4", SOCKS5: "SOCKS5", HTTP: "HTTP"}
 
 _orgsocket = _orig_socket = socket.socket
+
 
 class ProxyError(IOError):
     """
@@ -30,6 +45,11 @@ class ProxyError(IOError):
 
     def __str__(self):
         return self.msg
+
+    def __repr__(self):
+        # for %r
+        return repr(self.msg)
+
 
 class GeneralProxyError(ProxyError): pass
 class ProxyConnectionError(ProxyError): pass
@@ -58,6 +78,7 @@ DEFAULT_PORTS = { SOCKS4: 1080,
                   HTTP: 8080
                 }
 
+
 def set_default_proxy(proxy_type=None, addr=None, port=None, rdns=True, username=None, password=None):
     """
     set_default_proxy(proxy_type, addr[, port[, rdns[, username, password]]])
@@ -65,6 +86,17 @@ def set_default_proxy(proxy_type=None, addr=None, port=None, rdns=True, username
     Sets a default proxy which all further socksocket objects will use,
     unless explicitly changed. All parameters are as for socket.set_proxy().
     """
+    if isinstance(proxy_type, basestring):
+        proxy_type = proxy_type.lower()
+        if "http" in proxy_type:
+            proxy_type = PROXY_TYPE_HTTP
+        elif "socks5" in proxy_type:
+            proxy_type = PROXY_TYPE_SOCKS5
+        elif "socks4" in proxy_type:
+            proxy_type = PROXY_TYPE_SOCKS4
+        else:
+            raise ProxyError("unknown proxy type:%s" % proxy_type)
+
     socksocket.default_proxy = (proxy_type, addr, port, rdns,
                                 username.encode() if username else None,
                                 password.encode() if password else None)
@@ -204,6 +236,17 @@ class socksocket(_BaseSocket):
         password -    Password to authenticate with to the server.
                        Only relevant when username is also provided.
         """
+        if isinstance(proxy_type, basestring):
+            proxy_type = proxy_type.lower()
+            if "http" in proxy_type:
+                proxy_type = PROXY_TYPE_HTTP
+            elif "socks5" in proxy_type:
+                proxy_type = PROXY_TYPE_SOCKS5
+            elif "socks4" in proxy_type:
+                proxy_type = PROXY_TYPE_SOCKS4
+            else:
+                raise ProxyError("unknown proxy type:%s" % proxy_type)
+
         self.proxy = (proxy_type, addr, port, rdns,
                       username.encode() if username else None,
                       password.encode() if password else None)
@@ -424,10 +467,10 @@ class socksocket(_BaseSocket):
         proxy_type, _, _, rdns, username, password = self.proxy
 
         if ":" in host:
-            addr_bytes = socket.inet_pton(socket.AF_INET6, host)
+            addr_bytes = inet_pton(socket.AF_INET6, host)
             file.write(b"\x04" + addr_bytes)
         elif check_ip_valid(host):
-            addr_bytes = socket.inet_pton(socket.AF_INET, host)
+            addr_bytes = socket.inet_aton(host)
             file.write(b"\x01" + addr_bytes)
         else:
             if rdns:
@@ -451,7 +494,7 @@ class socksocket(_BaseSocket):
             length = self._readall(file, 1)
             addr = self._readall(file, ord(length))
         elif atyp == b"\x04":
-            addr = socket.inet_ntop(socket.AF_INET6, self._readall(file, 16))
+            addr = inet_ntop(socket.AF_INET6, self._readall(file, 16))
         else:
             raise GeneralProxyError("SOCKS5 proxy server sent invalid data")
 
@@ -527,8 +570,19 @@ class socksocket(_BaseSocket):
         # If we need to resolve locally, we do this now
         addr = dest_addr if rdns else socket.gethostbyname(dest_addr)
 
-        self.sendall(b"CONNECT " + addr.encode('idna') + b":" + str(dest_port).encode() +
-                     b" HTTP/1.1\r\n" + b"Host: " + dest_addr.encode('idna') + b"\r\n\r\n")
+        http_headers = [
+            (b"CONNECT " + addr.encode("idna") + b":"
+             + str(dest_port).encode() + b" HTTP/1.1"),
+            b"Host: " + dest_addr.encode("idna")
+        ]
+
+        if username and password:
+            http_headers.append(b"Proxy-Authorization: basic "
+                                + b64encode(username + b":" + password))
+
+        http_headers.append(b"\r\n")
+
+        self.sendall(b"\r\n".join(http_headers))
 
         # We just need the first line to check if the connection was successful
         fobj = self.makefile()
@@ -575,9 +629,16 @@ class socksocket(_BaseSocket):
         Uses the same API as socket's connect().
         To select the proxy server, use set_proxy().
 
-        dest_pair - 2-tuple of (IP/hostname, port).
+        dest_pair
         """
-        dest_addr, dest_port = dest_pair
+        if len(dest_pair) == 2:
+            # IPv4
+            dest_addr, dest_port = dest_pair
+        elif len(dest_pair) == 4:
+            # IPv6
+            dest_addr, dest_port, st_zero, st_stream  = dest_pair
+        else:
+            raise GeneralProxyError("Invalid destination-connection (host, port) pair")
 
         if self.type == socket.SOCK_DGRAM:
             if not self._proxyconn:
@@ -595,10 +656,7 @@ class socksocket(_BaseSocket):
         proxy_type, proxy_addr, proxy_port, rdns, username, password = self.proxy
 
         # Do a minimal input check first
-        if (not isinstance(dest_pair, (list, tuple))
-                or len(dest_pair) != 2
-                or not dest_addr
-                or not isinstance(dest_port, int)):
+        if not dest_addr or not isinstance(dest_port, int):
             raise GeneralProxyError("Invalid destination-connection (host, port) pair")
 
 
@@ -648,3 +706,18 @@ class socksocket(_BaseSocket):
         if not proxy_port:
             raise GeneralProxyError("Invalid proxy type")
         return proxy_addr, proxy_port
+
+
+import re
+g_ip_check = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+def check_ip_valid(ip):
+    global g_ip_check
+    ret = g_ip_check.match(ip)
+    if ret is not None:
+        "each item range: [0,255]"
+        for item in ret.groups():
+            if int(item) > 255:
+                return 0
+        return 1
+    else:
+        return 0
