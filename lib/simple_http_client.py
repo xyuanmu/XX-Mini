@@ -8,7 +8,6 @@ import errno
 import logging
 import ip_utils
 import ssl
-import socks
 
 
 class Connection():
@@ -43,6 +42,55 @@ class BaseResponse(object):
             return default_value
 
 
+class TxtResponse(BaseResponse):
+    def __init__(self, buffer):
+        BaseResponse.__init__(self)
+        self.read_buffer = buffer
+        self.buffer_start = 0
+        self.parse()
+
+    def read_line(self):
+        n1 = self.read_buffer.find("\r\n", self.buffer_start)
+        if n1 == -1:
+            raise Exception("read_line fail")
+
+        line = self.read_buffer[self.buffer_start:n1]
+        self.buffer_start = n1 + 2
+        return line
+
+    def read_headers(self):
+        n1 = self.read_buffer.find("\r\n\r\n", self.buffer_start)
+        if n1 == -1:
+            raise Exception("read_headers fail")
+        block = self.read_buffer[self.buffer_start:n1]
+        self.buffer_start = n1 + 4
+        return block
+
+    def parse(self):
+        requestline = self.read_line()
+        words = requestline.split()
+        if len(words) < 2:
+            raise Exception("status line:%s" % requestline)
+
+        self.version = words[0]
+        self.status = int(words[1])
+        self.info = " ".join(words[2:])
+
+        self.headers = {}
+        header_block = self.read_headers()
+        lines = header_block.split("\r\n")
+        for line in lines:
+            p = line.find(":")
+            key = line[0:p]
+            value = line[p+2:]
+            key = str(key.title())
+            self.headers[key] = value
+
+        self.body = self.read_buffer[self.buffer_start:]
+        self.read_buffer = ""
+        self.buffer_start = 0
+
+
 class Response(BaseResponse):
     def __init__(self, ssl_sock):
         BaseResponse.__init__(self)
@@ -71,7 +119,7 @@ class Response(BaseResponse):
                     data = sock.recv(8192)
                 except socket.error as e:
                     # logging.exception("e:%r", e)
-                    if e.errno in [2, 11]:
+                    if e.errno in [2, 11, 10035]:
                         time.sleep(0.1)
                         continue
                     else:
@@ -103,7 +151,7 @@ class Response(BaseResponse):
                     data = sock.recv(8192)
                 except socket.error as e:
                     # logging.exception("e:%r", e)
-                    if e.errno in [2, 11]:
+                    if e.errno in [2, 11, 10035]:
                         time.sleep(0.1)
                         continue
                     else:
@@ -179,7 +227,7 @@ class Response(BaseResponse):
                 data = self.connection.recv(to_read)
             except socket.error as e:
                 # logging.exception("e:%r", e)
-                if e.errno in [2, 11]:
+                if e.errno in [2, 11, 10035]:
                     time.sleep(0.1)
                     continue
                 else:
@@ -228,195 +276,12 @@ class Response(BaseResponse):
             return self._read_plain(int(self.content_length), timeout=timeout)
 
 
-class HTTP_client():
-    def __init__(self, address, http_proxy=None, use_https=False, conn_life=30, cert="CA.crt"):
-        # address can be set or tuple [host, port]
-        self.address = address
-        self.http_proxy = http_proxy
-        self.use_https = use_https
-        self.conn_life = conn_life
+class Client(object):
+    def __init__(self, proxy=None, timeout=60, cert=""):
+        self.timeout = timeout
         self.cert = cert
 
-
-        if not self.http_proxy:
-            self.path_base = ""
-        else:
-            if use_https:
-                self.path_base = "https://%s:%d" % self.address
-            else:
-                self.path_base = "http://%s:%d" % self.address
-
-        self.sock_pool = Queue.Queue()
-
-    def create_sock(self, host):
-        if ":" in self.address[0]:
-            sock = socket.socket(socket.AF_INET6)
-        else:
-            sock = socket.socket(socket.AF_INET)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
-        sock.settimeout(5)
-        try:
-            if not self.http_proxy:
-                if self.use_https:
-                    if os.path.isfile(self.cert):
-                        sock = ssl.wrap_socket(sock, ca_certs=self.cert, do_handshake_on_connect=True)
-                    else:
-                        sock = ssl.wrap_socket(sock, do_handshake_on_connect=True)
-
-                sock.connect(self.address)
-            else:
-                sock.connect(self.http_proxy)
-        except Exception as e:
-            #logging.warn("create connect to %s:%d fail:%r", self.address[0], self.address[1], e)
-            sock.close()
-            return None
-
-        return sock
-
-    def get_conn(self, host):
-        try:
-            conn = self.sock_pool.get_nowait()
-            if self.conn_life and time.time() - conn.create_time > self.conn_life:
-                #logging.debug("drop old sock")
-                conn.close()
-                raise
-            return conn
-        except:
-            sock = self.create_sock(host)
-            if not sock:
-                return None
-
-            conn = Connection(sock)
-            return conn
-
-    def request(self, method="GET", path="", header={}, data="", timeout=60):
-        response = None
-        start_time = time.time()
-        end_time = start_time + timeout
-        try:
-            time_request = time.time()
-            header["Content-Length"] = str(len(data))
-            host = self.address[0] + ":" + str(self.address[1])
-            header["Host"] = host
-            if path.startswith("/"):
-                req_path = self.path_base + path
-            else:
-                req_path = self.path_base + "/" + path
-            response = self.fetch(method, host, req_path, header, data, timeout=timeout)
-            if not response:
-                #logging.warn("post return fail")
-                return "", False, response
-
-            if response.status != 200:
-                #logging.warn("post status:%r", response.status)
-                return "", response.status, response
-
-            response_headers = dict((k.title(), v) for k, v in response.getheaders())
-
-            if 'Transfer-Encoding' in response_headers:
-                length = 0
-                data_buffer = []
-                while True:
-                    try:
-                        data = response.read(8192)
-                    except httplib.IncompleteRead, e:
-                        data = e.partial
-                    except Exception as e:
-                        xlog.warn("Transfer-Encoding e:%r ", e)
-                        return "", False, response
-                    
-
-                    if not data:
-                        break
-                    else:
-                        data_buffer.append(data)
-
-                #self.sock_pool.put(response.conn)
-                response_data = "".join(data_buffer)
-                return response_data, 200, response
-            else:
-                content_length = int(response.getheader('Content-Length', 0))
-                start, end, length = 0, content_length-1, content_length
-
-                last_read_time = time.time()
-                data_buffer = []
-                while True:
-                    if start > end:
-                        self.sock_pool.put(response.conn)
-                        #logging.info("POST t:%d s:%d %d %s", (time.time()-time_request)*1000, length, response.status, req_path)
-                        response_data = "".join(data_buffer)
-                        return response_data, 200, response
-
-                    data = response.read(65535)
-                    if not data:
-                        if time.time() - last_read_time > 20 or time.time() > end_time:
-                            response.close()
-                            #logging.warn("read timeout t:%d len:%d left:%d %s", (time.time()-time_request)*1000, length, (end-start), req_path)
-                            return "", False, response
-                        else:
-                            time.sleep(0.1)
-                            continue
-
-                    last_read_time = time.time()
-                    data_len = len(data)
-                    start += data_len
-                    data_buffer.append(data)
-        except IOError, e:
-            if e.errno == errno.EPIPE:
-                pass
-        except Exception as e:
-            logging.exception("Post e:%r", e)
-            self.sock = None
-        return "", 400, response
-
-
-    def fetch(self, method, host, path, headers, payload, bufsize=8192, timeout=20):
-        request_data = '%s %s HTTP/1.1\r\n' % (method, path)
-        request_data += ''.join('%s: %s\r\n' % (k, v) for k, v in headers.items())
-        request_data += '\r\n'
-
-        #print("request:%s" % request_data)
-        #print("payload:%s" % payload)
-
-        conn = self.get_conn(host)
-        if not conn:
-            logging.warn("get sock fail")
-            return
-
-        if len(request_data) + len(payload) < 1300:
-            payload = request_data.encode() + payload
-        else:
-            conn.sock.send(request_data.encode())
-            
-        payload_len = len(payload)
-        start = 0
-        while start < payload_len:
-            send_size = min(payload_len - start, 65535)
-            sended = conn.sock.send(payload[start:start+send_size])
-            start += sended
-
-        conn.sock.settimeout(timeout)
-        response = httplib.HTTPResponse(conn.sock, buffering=True)
-
-        response.conn = conn
-        try:
-            #orig_timeout = conn.sock.gettimeout()
-            #conn.sock.settimeout(timeout)
-            response.begin()
-            #conn.sock.settimeout(orig_timeout)
-        except httplib.BadStatusLine as e:
-            logging.warn("fetch bad status line:%r", e)
-            response = None
-        except Exception as e:
-            logging.warn("fetch:%r", e)
-        return response
-
-
-class Client(object):
-    def __init__(self, proxy, timeout):
-        self.timeout = timeout
-
-        if proxy:
+        if isinstance(proxy, str):
             proxy_sp = urlparse.urlsplit(proxy)
 
             self.proxy = {
@@ -426,6 +291,8 @@ class Client(object):
                 "user": proxy_sp.username,
                 "pass": proxy_sp.password
             }
+        elif isinstance(proxy, dict):
+            self.proxy = proxy
         else:
             self.proxy = None
 
@@ -470,36 +337,30 @@ class Client(object):
         connect_timeout = 5
         sock = None
         start_time = time.time()
-        try:
-            sock = socks.socksocket(socket.AF_INET)
-            sock.set_proxy(proxy_type=self.proxy["type"],
-                           addr=self.proxy["host"],
-                           port=self.proxy["port"], rdns=True,
-                           username=self.proxy["user"],
-                           password=self.proxy["pass"])
 
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
-            sock.settimeout(connect_timeout)
+        import socks
 
-            sock.connect((host, port))
+        sock = socks.socksocket(socket.AF_INET)
+        sock.set_proxy(proxy_type=self.proxy["type"],
+                       addr=self.proxy["host"],
+                       port=self.proxy["port"], rdns=True,
+                       username=self.proxy["user"],
+                       password=self.proxy["pass"])
 
-            # conn_time = time.time() - start_time
-            # xlog.debug("proxy:%s tcp conn:%s time:%d", proxy["host"], host, conn_time * 1000)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
+        sock.settimeout(connect_timeout)
 
-            return sock
-        except Exception as e:
-            conn_time = int((time.time() - start_time) * 1000)
-            logging.exception("proxy:conn fail:%r", e)
-            if sock:
-                sock.close()
+        sock.connect((host, port))
 
-            return None
+        # conn_time = time.time() - start_time
+        # xlog.debug("proxy:%s tcp conn:%s time:%d", proxy["host"], host, conn_time * 1000)
 
-    def request(self, method, url, headers, body):
+        return sock
+
+    def request(self, method, url, headers={}, body="", read_payload=True):
         start_time = time.time()
-        end_time = start_time + self.timeout
 
         upl = urlparse.urlsplit(url)
         headers["Content-Length"] = str(len(body))
@@ -525,75 +386,68 @@ class Client(object):
             return None
 
         if upl.scheme == "https":
-            sock = ssl.wrap_socket(sock)
-
-        try:
-            request_data = '%s %s HTTP/1.1\r\n' % (method, path)
-
-            request_data += ''.join('%s: %s\r\n' % (k, v) for k, v in headers.items())
-            request_data += '\r\n'
-
-            if len(request_data) + len(body) < 1300:
-                body = request_data.encode() + body
+            if os.path.isfile(self.cert):
+                sock = ssl.wrap_socket(sock, ca_certs=self.cert)
             else:
-                sock.send(request_data.encode())
+                sock = ssl.wrap_socket(sock)
 
-            payload_len = len(body)
-            start = 0
-            while start < payload_len:
-                send_size = min(payload_len - start, 65535)
-                sended = sock.send(body[start:start + send_size])
-                start += sended
+        request_data = '%s %s HTTP/1.1\r\n' % (method, path)
 
-            sock.settimeout(self.timeout)
-            response = Response(sock)
+        request_data += ''.join('%s: %s\r\n' % (k, v) for k, v in headers.items())
+        request_data += '\r\n'
 
-            try:
-                response.begin(timeout=self.timeout)
-            except Exception as e:
-                logging.warn("response.begin:%r", e)
-                return None
+        if len(request_data) + len(body) < 1300:
+            body = request_data.encode() + body
+        else:
+            sock.send(request_data.encode())
 
-            if response.status != 200:
-                logging.warn("status:%r", response.status)
-                return response
+        payload_len = len(body)
+        start = 0
+        while start < payload_len:
+            send_size = min(payload_len - start, 65535)
+            sended = sock.send(body[start:start + send_size])
+            start += sended
 
-            if 'Transfer-Encoding' in response.headers:
-                data_buffer = []
-                while True:
-                    try:
-                        data = response.read(8192)
-                    except httplib.IncompleteRead, e:
-                        data = e.partial
-                    except Exception as e:
-                        logging.warn("Transfer-Encoding e:%r ", e)
-                        return False
+        sock.settimeout(self.timeout)
+        response = Response(sock)
 
-                    if not data:
-                        break
-                    else:
-                        data_buffer.append(data)
+        response.begin(timeout=self.timeout)
 
-                response.text = "".join(data_buffer)
-                return response
-            else:
-                content_length = int(response.getheader('Content-Length', 0))
-                if content_length:
-                    response.text = response.read(content_length)
+        if response.status != 200:
+            #logging.warn("status:%r", response.status)
+            return response
 
-                return response
-        except IOError, e:
-            if e.errno == errno.EPIPE:
-                pass
-        except Exception as e:
-            logging.warn("request e:%r", e)
+        if not read_payload:
+            return response
 
-        return False
+        if 'Transfer-Encoding' in response.headers:
+            data_buffer = []
+            while True:
+                try:
+                    data = response.read(8192, timeout=self.timeout)
+                except httplib.IncompleteRead, e:
+                    data = e.partial
+                except Exception as e:
+                    raise e
+
+                if not data:
+                    break
+                else:
+                    data_buffer.append(data)
+
+            response.text = "".join(data_buffer)
+            return response
+        else:
+            content_length = int(response.getheader('Content-Length', 0))
+            if content_length:
+                response.text = response.read(content_length, timeout=self.timeout)
+
+            return response
 
 
-def request(method="GET", url=None, headers={}, body="", proxy=None, timeout=60):
+def request(method="GET", url=None, headers={}, body="", proxy=None, timeout=60, read_payload=True):
     if not url:
         raise Exception("no url")
 
     client = Client(proxy, timeout=timeout)
-    return client.request(method, url, headers, body)
+    return client.request(method, url, headers, body, read_payload)
